@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <ctype.h>
 #include <inttypes.h>
+#include <limits.h>
 
 // ==================== 256-BIT INTEGER (EXACT) ====================
 
@@ -22,6 +23,9 @@ typedef struct {
 
 Int256 str_to_int256(const char* str) {
     Int256 result = {{0, 0, 0, 0}, 0};
+    
+    // Skip leading whitespace
+    while (isspace((unsigned char)*str)) str++;
     
     int i = 0;
     if (str[0] == '-') {
@@ -44,12 +48,15 @@ Int256 str_to_int256(const char* str) {
         uint64_t digit;
         char c = str[i];
         
-        if (c >= '0' && c <= '9') digit = c - '0';
-        else if (base == 16) {
+        if (c >= '0' && c <= '9') {
+            digit = c - '0';
+        } else if (base == 16) {
             if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
             else if (c >= 'a' && c <= 'f') digit = c - 'a' + 10;
             else break;
-        } else break;
+        } else {
+            break;
+        }
         
         if (digit >= (uint64_t)base) break;
         
@@ -70,6 +77,13 @@ Int256 str_to_int256(const char* str) {
         i++;
     }
     
+    // Skip trailing whitespace
+    while (str[i] && isspace((unsigned char)str[i])) i++;
+    
+    if (str[i] != '\0') {
+        printf("Warning: Invalid characters in number '%s'\n", str);
+    }
+    
     if (result.part[0] == 0 && result.part[1] == 0 && 
         result.part[2] == 0 && result.part[3] == 0) {
         result.sign = 0;
@@ -78,7 +92,12 @@ Int256 str_to_int256(const char* str) {
     return result;
 }
 
-void int256_to_hex(Int256 n, char* buffer) {
+void int256_to_hex(const Int256 n, char* buffer, size_t buffer_size) {
+    if (buffer_size < 68) {  // 2 for "0x" + 64 hex digits + 1 for sign + 1 for null
+        buffer[0] = '\0';
+        return;
+    }
+    
     char* ptr = buffer;
     
     if (n.sign) *ptr++ = '-';
@@ -89,33 +108,56 @@ void int256_to_hex(Int256 n, char* buffer) {
     for (int i = 0; i < 4; i++) {
         if (n.part[i] != 0 || started || i == 3) {
             if (!started) {
-                sprintf(ptr, "%lX", (unsigned long)n.part[i]);
+                int written = snprintf(ptr, buffer_size - (ptr - buffer), 
+                                      "%" PRIx64, n.part[i]);
+                if (written < 0) {
+                    buffer[0] = '\0';
+                    return;
+                }
+                ptr += written;
                 started = 1;
             } else {
-                sprintf(ptr, "%016lX", (unsigned long)n.part[i]);
+                int written = snprintf(ptr, buffer_size - (ptr - buffer), 
+                                      "%016" PRIx64, n.part[i]);
+                if (written < 0) {
+                    buffer[0] = '\0';
+                    return;
+                }
+                ptr += written;
             }
-            ptr += strlen(ptr);
         }
     }
     if (!started) {
         *ptr++ = '0';
         *ptr = '\0';
+    } else {
+        *ptr = '\0';
     }
 }
 
-void int256_to_decimal(Int256 n, char* buffer) {
-    if (n.sign) {
-        *buffer++ = '-';
-    }
-    
-    if (n.part[0] == 0 && n.part[1] == 0 && n.part[2] == 0 && n.part[3] == 0) {
-        *buffer++ = '0';
-        *buffer = '\0';
+void int256_to_decimal(const Int256 n, char* buffer, size_t buffer_size) {
+    if (buffer_size < 2) {
+        buffer[0] = '\0';
         return;
     }
     
+    char* buf_ptr = buffer;
+    
+    if (n.sign && buffer_size > 1) {
+        *buf_ptr++ = '-';
+        buffer_size--;
+    }
+    
+    if (n.part[0] == 0 && n.part[1] == 0 && n.part[2] == 0 && n.part[3] == 0) {
+        *buf_ptr++ = '0';
+        *buf_ptr = '\0';
+        return;
+    }
+    
+    // Use a temporary buffer large enough for 256-bit decimal (up to 78 digits)
     char temp[100] = {0};
-    int pos = 99;
+    int pos = sizeof(temp) - 1;
+    temp[pos] = '\0';
     
     uint64_t work[8] = {0};
     work[4] = n.part[0];
@@ -131,10 +173,18 @@ void int256_to_decimal(Int256 n, char* buffer) {
             remainder = (uint64_t)(value % BASE);
         }
         
-        for (int j = 0; j < 9; j++) {
-            if (remainder == 0 && j > 0) break;
-            temp[--pos] = '0' + (remainder % 10);
+        // Extract 9 decimal digits from remainder
+        char digits[10];
+        for (int j = 8; j >= 0; j--) {
+            digits[j] = '0' + (remainder % 10);
             remainder /= 10;
+        }
+        
+        // Add digits to temp buffer
+        int start = 0;
+        while (start < 9 && digits[start] == '0') start++;
+        for (int j = start; j < 9; j++) {
+            temp[--pos] = digits[j];
         }
         
         int all_zero = 1;
@@ -147,11 +197,19 @@ void int256_to_decimal(Int256 n, char* buffer) {
         if (all_zero) break;
     }
     
+    // Remove leading zeros
     while (temp[pos] == '0') pos++;
-    strcpy(buffer, &temp[pos]);
+    
+    // Copy to output buffer
+    size_t len = sizeof(temp) - pos - 1;
+    if (len >= buffer_size) {
+        buffer[0] = '\0';
+        return;
+    }
+    strcpy(buf_ptr, &temp[pos]);
 }
 
-int cmp_abs_int256(Int256 a, Int256 b) {
+int cmp_abs_int256(const Int256 a, const Int256 b) {
     for (int i = 0; i < 4; i++) {
         if (a.part[i] < b.part[i]) return -1;
         if (a.part[i] > b.part[i]) return 1;
@@ -159,7 +217,7 @@ int cmp_abs_int256(Int256 a, Int256 b) {
     return 0;
 }
 
-int is_zero_int256(Int256 a) {
+int is_zero_int256(const Int256 a) {
     return a.part[0] == 0 && a.part[1] == 0 && a.part[2] == 0 && a.part[3] == 0;
 }
 
@@ -185,7 +243,7 @@ static inline uint64_t add_with_carry(uint64_t a, uint64_t b, uint64_t* carry) {
 
 static inline uint64_t sub_with_borrow(uint64_t a, uint64_t b, uint64_t* borrow) {
     __uint128_t diff = (__uint128_t)a - b - *borrow;
-    *borrow = (diff >> 64) ? 1 : 0;
+    *borrow = (diff >> 127) ? 1 : 0;  // Fix: check if underflow occurred
     return (uint64_t)diff;
 }
 
@@ -198,6 +256,10 @@ Int256 add_int256(Int256 a, Int256 b) {
             result.part[i] = add_with_carry(a.part[i], b.part[i], &carry);
         }
         result.sign = a.sign;
+        // If we have carry out of most significant part, we have overflow
+        if (carry != 0) {
+            printf("Warning: Addition overflow\n");
+        }
     } else {
         if (cmp_abs_int256(a, b) >= 0) {
             uint64_t borrow = 0;
@@ -236,10 +298,9 @@ Int256 mul_int256(Int256 a, Int256 b) {
             __uint128_t product = (__uint128_t)a.part[i] * b.part[j];
             int pos = (3 - i) + (3 - j);  // Position in temp array
             
-            // Add to temp with carry handling
             temp[pos] += (uint64_t)product;
-            if (temp[pos] < (uint64_t)product) { // Overflow occurred
-                temp[pos + 1]++;
+            if (temp[pos] < (uint64_t)product) { // Check for overflow
+                temp[pos + 1] += 1;
             }
             temp[pos + 1] += (product >> 64);
         }
@@ -247,13 +308,19 @@ Int256 mul_int256(Int256 a, Int256 b) {
     
     // Propagate carries
     for (int i = 0; i < 7; i++) {
-        if (temp[i] >> 64) {
-            temp[i + 1] += (temp[i] >> 64);
+        uint64_t carry = (uint64_t)(temp[i] >> 64);
+        if (carry != 0) {
             temp[i] &= 0xFFFFFFFFFFFFFFFFULL;
+            temp[i + 1] += carry;
         }
     }
     
-    // Build result (256 bits, ignore overflow beyond that)
+    // Check for overflow beyond 256 bits
+    if (temp[7] != 0 || temp[6] != 0 || temp[5] != 0 || temp[4] != 0) {
+        printf("Warning: Multiplication overflow (result exceeds 256 bits)\n");
+    }
+    
+    // Build result (256 bits)
     Int256 result;
     result.part[3] = (uint64_t)temp[0];
     result.part[2] = (uint64_t)temp[1];
@@ -267,6 +334,7 @@ Int256 mul_int256(Int256 a, Int256 b) {
     return result;
 }
 
+// FIXED DIVISION - Binary long division with proper sign handling
 Int256 div_int256(Int256 a, Int256 b) {
     if (is_zero_int256(b)) {
         printf("Error: Division by zero!\n");
@@ -274,10 +342,14 @@ Int256 div_int256(Int256 a, Int256 b) {
     }
     
     int result_sign = a.sign ^ b.sign;
-    a = abs_int256(a);
-    b = abs_int256(b);
     
-    if (cmp_abs_int256(a, b) < 0) {
+    // Work with absolute values
+    Int256 a_abs = a;
+    a_abs.sign = 0;
+    Int256 b_abs = b;
+    b_abs.sign = 0;
+    
+    if (cmp_abs_int256(a_abs, b_abs) < 0) {
         return (Int256){{0, 0, 0, 0}, 0};
     }
     
@@ -288,22 +360,28 @@ Int256 div_int256(Int256 a, Int256 b) {
     for (int i = 0; i < 4; i++) {
         for (int bit = 63; bit >= 0; bit--) {
             // Shift remainder left by 1
-            for (int j = 0; j < 3; j++) {
-                remainder.part[j] = (remainder.part[j] << 1) | (remainder.part[j+1] >> 63);
-            }
-            remainder.part[3] <<= 1;
+            uint64_t carry = remainder.part[0] >> 63;
+            remainder.part[0] = (remainder.part[0] << 1) | (remainder.part[1] >> 63);
+            remainder.part[1] = (remainder.part[1] << 1) | (remainder.part[2] >> 63);
+            remainder.part[2] = (remainder.part[2] << 1) | (remainder.part[3] >> 63);
+            remainder.part[3] = (remainder.part[3] << 1);
             
             // Add next bit from a
-            remainder.part[3] |= (a.part[i] >> bit) & 1;
+            remainder.part[3] |= (a_abs.part[i] >> bit) & 1;
             
             // Shift quotient left
-            for (int j = 0; j < 3; j++) {
-                quotient.part[j] = (quotient.part[j] << 1) | (quotient.part[j+1] >> 63);
-            }
-            quotient.part[3] <<= 1;
+            carry = quotient.part[0] >> 63;
+            quotient.part[0] = (quotient.part[0] << 1) | (quotient.part[1] >> 63);
+            quotient.part[1] = (quotient.part[1] << 1) | (quotient.part[2] >> 63);
+            quotient.part[2] = (quotient.part[2] << 1) | (quotient.part[3] >> 63);
+            quotient.part[3] = (quotient.part[3] << 1);
             
-            if (cmp_abs_int256(remainder, b) >= 0) {
-                remainder = sub_int256(remainder, b);
+            if (cmp_abs_int256(remainder, b_abs) >= 0) {
+                // Subtract b from remainder
+                uint64_t borrow = 0;
+                for (int j = 3; j >= 0; j--) {
+                    remainder.part[j] = sub_with_borrow(remainder.part[j], b_abs.part[j], &borrow);
+                }
                 quotient.part[3] |= 1;
             }
         }
@@ -321,37 +399,75 @@ Int256 mod_int256(Int256 a, Int256 b) {
         return (Int256){{0, 0, 0, 0}, 0};
     }
     
-    Int256 quotient = div_int256(a, b);
-    Int256 product = mul_int256(quotient, b);
-    return sub_int256(a, product);
+    int result_sign = a.sign;  // Remainder takes sign of dividend
+    
+    // Work with absolute values
+    Int256 a_abs = a;
+    a_abs.sign = 0;
+    Int256 b_abs = b;
+    b_abs.sign = 0;
+    
+    if (cmp_abs_int256(a_abs, b_abs) < 0) {
+        return a;  // If |a| < |b|, remainder is a
+    }
+    
+    // Binary long division to get remainder
+    Int256 remainder = {{0, 0, 0, 0}, 0};
+    
+    for (int i = 0; i < 4; i++) {
+        for (int bit = 63; bit >= 0; bit--) {
+            // Shift remainder left by 1
+            uint64_t carry = remainder.part[0] >> 63;
+            remainder.part[0] = (remainder.part[0] << 1) | (remainder.part[1] >> 63);
+            remainder.part[1] = (remainder.part[1] << 1) | (remainder.part[2] >> 63);
+            remainder.part[2] = (remainder.part[2] << 1) | (remainder.part[3] >> 63);
+            remainder.part[3] = (remainder.part[3] << 1);
+            
+            // Add next bit from a
+            remainder.part[3] |= (a_abs.part[i] >> bit) & 1;
+            
+            if (cmp_abs_int256(remainder, b_abs) >= 0) {
+                // Subtract b from remainder
+                uint64_t borrow = 0;
+                for (int j = 3; j >= 0; j--) {
+                    remainder.part[j] = sub_with_borrow(remainder.part[j], b_abs.part[j], &borrow);
+                }
+            }
+        }
+    }
+    
+    remainder.sign = result_sign;
+    if (is_zero_int256(remainder)) remainder.sign = 0;
+    
+    return remainder;
 }
 
 // ==================== BITWISE OPERATIONS ====================
 
 Int256 and_int256(Int256 a, Int256 b) {
     Int256 result;
-    result.sign = a.sign & b.sign;
     for (int i = 0; i < 4; i++) {
         result.part[i] = a.part[i] & b.part[i];
     }
+    result.sign = a.sign & b.sign;
     return result;
 }
 
 Int256 or_int256(Int256 a, Int256 b) {
     Int256 result;
-    result.sign = a.sign | b.sign;
     for (int i = 0; i < 4; i++) {
         result.part[i] = a.part[i] | b.part[i];
     }
+    result.sign = a.sign | b.sign;
     return result;
 }
 
 Int256 xor_int256(Int256 a, Int256 b) {
     Int256 result;
-    result.sign = a.sign ^ b.sign;
     for (int i = 0; i < 4; i++) {
         result.part[i] = a.part[i] ^ b.part[i];
     }
+    result.sign = a.sign ^ b.sign;
     return result;
 }
 
@@ -421,6 +537,10 @@ int cmp_int256(Int256 a, Int256 b) {
 // ==================== POWER AND FACTORIAL (FIXED) ====================
 
 Int256 pow_int256(Int256 base, unsigned int exp) {
+    if (exp == 0) {
+        return (Int256){{0, 0, 0, 1}, 0};
+    }
+    
     Int256 result = {{0, 0, 0, 1}, 0};
     Int256 temp = base;
     
@@ -442,6 +562,10 @@ Int256 factorial_int256(unsigned int n) {
     for (unsigned int i = 2; i <= n; i++) {
         Int256 multiplier = {{0, 0, 0, i}, 0};
         result = mul_int256(result, multiplier);
+        if (is_zero_int256(result)) {
+            printf("Warning: Factorial overflow at i=%u\n", i);
+            break;
+        }
     }
     
     return result;
@@ -471,6 +595,7 @@ int main() {
     
     while (1) {
         print_menu();
+        fflush(stdout);
         
         if (fgets(input, sizeof(input), stdin) == NULL) {
             break;
@@ -479,7 +604,7 @@ int main() {
         // Remove newline
         input[strcspn(input, "\n")] = '\0';
         
-        // Check for empty input
+        // Skip empty input
         if (input[0] == '\0') {
             printf("Please enter a choice (0-15)\n");
             continue;
@@ -496,22 +621,36 @@ int main() {
         
         int choice = (int)choice_long;
         
+        if (choice < 0 || choice > 15) {
+            printf("Invalid choice: %d. Please enter 0-15.\n", choice);
+            continue;
+        }
+        
         if (choice == 0) break;
         
         char buffer1[100], buffer2[100];
         char result_hex[70], result_dec[80];
         Int256 a, b, result;
-        unsigned int shift, power, factorial_n;
+        unsigned int shift = 0, power = 0, factorial_n = 0;
+        int cmp;
         
         switch (choice) {
             case 1: case 2: case 3: case 4: case 5:
             case 6: case 7: case 8:
                 printf("Enter first number (decimal/hex/0b binary): ");
-                if (fgets(buffer1, sizeof(buffer1), stdin) == NULL) break;
+                fflush(stdout);
+                if (fgets(buffer1, sizeof(buffer1), stdin) == NULL) {
+                    printf("Input error\n");
+                    break;
+                }
                 buffer1[strcspn(buffer1, "\n")] = '\0';
                 
                 printf("Enter second number: ");
-                if (fgets(buffer2, sizeof(buffer2), stdin) == NULL) break;
+                fflush(stdout);
+                if (fgets(buffer2, sizeof(buffer2), stdin) == NULL) {
+                    printf("Input error\n");
+                    break;
+                }
                 buffer2[strcspn(buffer2, "\n")] = '\0';
                 
                 a = str_to_int256(buffer1);
@@ -526,20 +665,26 @@ int main() {
                     case 6: result = and_int256(a, b); break;
                     case 7: result = or_int256(a, b); break;
                     case 8: result = xor_int256(a, b); break;
+                    default: result = a; break;
                 }
                 
-                int256_to_hex(result, result_hex);
-                int256_to_decimal(result, result_dec);
+                int256_to_hex(result, result_hex, sizeof(result_hex));
+                int256_to_decimal(result, result_dec, sizeof(result_dec));
                 printf("\nResult: %s\n", result_dec);
                 printf("Hex: %s\n", result_hex);
                 break;
                 
             case 9: case 10:
                 printf("Enter number: ");
-                if (fgets(buffer1, sizeof(buffer1), stdin) == NULL) break;
+                fflush(stdout);
+                if (fgets(buffer1, sizeof(buffer1), stdin) == NULL) {
+                    printf("Input error\n");
+                    break;
+                }
                 buffer1[strcspn(buffer1, "\n")] = '\0';
                 
                 printf("Enter bits to shift: ");
+                fflush(stdout);
                 if (scanf("%u", &shift) != 1) {
                     while (getchar() != '\n');  // Clear input
                     printf("Invalid shift amount.\n");
@@ -547,22 +692,32 @@ int main() {
                 }
                 while (getchar() != '\n');  // Clear newline
                 
+                if (shift > 255) {
+                    printf("Warning: Shift amount %u > 255, using 255\n", shift);
+                    shift = 255;
+                }
+                
                 a = str_to_int256(buffer1);
                 result = (choice == 9) ? shift_left_int256(a, shift) 
                                       : shift_right_int256(a, shift);
                 
-                int256_to_hex(result, result_hex);
-                int256_to_decimal(result, result_dec);
+                int256_to_hex(result, result_hex, sizeof(result_hex));
+                int256_to_decimal(result, result_dec, sizeof(result_dec));
                 printf("\nResult: %s\n", result_dec);
                 printf("Hex: %s\n", result_hex);
                 break;
                 
             case 11:
                 printf("Enter base: ");
-                if (fgets(buffer1, sizeof(buffer1), stdin) == NULL) break;
+                fflush(stdout);
+                if (fgets(buffer1, sizeof(buffer1), stdin) == NULL) {
+                    printf("Input error\n");
+                    break;
+                }
                 buffer1[strcspn(buffer1, "\n")] = '\0';
                 
                 printf("Enter exponent: ");
+                fflush(stdout);
                 if (scanf("%u", &power) != 1) {
                     while (getchar() != '\n');
                     printf("Invalid exponent.\n");
@@ -573,14 +728,15 @@ int main() {
                 a = str_to_int256(buffer1);
                 result = pow_int256(a, power);
                 
-                int256_to_hex(result, result_hex);
-                int256_to_decimal(result, result_dec);
+                int256_to_hex(result, result_hex, sizeof(result_hex));
+                int256_to_decimal(result, result_dec, sizeof(result_dec));
                 printf("\nResult: %s\n", result_dec);
                 printf("Hex: %s\n", result_hex);
                 break;
                 
             case 12:
                 printf("Enter n (0-100): ");
+                fflush(stdout);
                 if (scanf("%u", &factorial_n) != 1) {
                     while (getchar() != '\n');
                     printf("Invalid n.\n");
@@ -593,48 +749,64 @@ int main() {
                 }
                 
                 result = factorial_int256(factorial_n);
-                int256_to_decimal(result, result_dec);
-                int256_to_hex(result, result_hex);
+                int256_to_decimal(result, result_dec, sizeof(result_dec));
+                int256_to_hex(result, result_hex, sizeof(result_hex));
                 printf("\n%d! = %s\n", factorial_n, result_dec);
                 printf("Hex: %s\n", result_hex);
                 break;
                 
             case 13:
                 printf("Enter first number: ");
-                if (fgets(buffer1, sizeof(buffer1), stdin) == NULL) break;
+                fflush(stdout);
+                if (fgets(buffer1, sizeof(buffer1), stdin) == NULL) {
+                    printf("Input error\n");
+                    break;
+                }
                 buffer1[strcspn(buffer1, "\n")] = '\0';
                 
                 printf("Enter second number: ");
-                if (fgets(buffer2, sizeof(buffer2), stdin) == NULL) break;
+                fflush(stdout);
+                if (fgets(buffer2, sizeof(buffer2), stdin) == NULL) {
+                    printf("Input error\n");
+                    break;
+                }
                 buffer2[strcspn(buffer2, "\n")] = '\0';
                 
                 a = str_to_int256(buffer1);
                 b = str_to_int256(buffer2);
                 
-                int cmp = cmp_int256(a, b);
+                cmp = cmp_int256(a, b);
                 printf("\n%s %c %s\n", buffer1, 
                       cmp < 0 ? '<' : cmp > 0 ? '>' : '=', buffer2);
                 break;
                 
             case 14:
                 printf("Enter number: ");
-                if (fgets(buffer1, sizeof(buffer1), stdin) == NULL) break;
+                fflush(stdout);
+                if (fgets(buffer1, sizeof(buffer1), stdin) == NULL) {
+                    printf("Input error\n");
+                    break;
+                }
                 buffer1[strcspn(buffer1, "\n")] = '\0';
                 
                 a = str_to_int256(buffer1);
                 result = neg_int256(a);
-                int256_to_decimal(result, result_dec);
+                int256_to_decimal(result, result_dec, sizeof(result_dec));
                 printf("\nResult: %s\n", result_dec);
                 break;
                 
             case 15:
                 printf("Enter number: ");
-                if (fgets(buffer1, sizeof(buffer1), stdin) == NULL) break;
+                fflush(stdout);
+                if (fgets(buffer1, sizeof(buffer1), stdin) == NULL) {
+                    printf("Input error\n");
+                    break;
+                }
                 buffer1[strcspn(buffer1, "\n")] = '\0';
                 
                 a = str_to_int256(buffer1);
                 result = abs_int256(a);
-                int256_to_decimal(result, result_dec);
+                int256_to_decimal(result, result_dec, sizeof(result_dec));
                 printf("\n|%s| = %s\n", buffer1, result_dec);
                 break;
                 
