@@ -1,2 +1,2 @@
-# 256-bits-calculator
+# 256-bits-interger-calculator
 maybe working 256 bits calculator 
